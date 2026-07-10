@@ -35,6 +35,45 @@ function generateRoomCode() {
   return code;
 }
 
+function calculateGuaranteedTricks(players) {
+  const activePlayers = players.filter(player => !player.eliminated);
+
+  activePlayers.forEach(player => {
+    if (activePlayers.length === 1) {
+      player.guaranteedTricks = player.hand.length;
+      return;
+    }
+
+    const maxOtherHand = Math.max(
+      ...activePlayers
+        .filter(otherPlayer => otherPlayer !== player)
+        .map(otherPlayer => otherPlayer.hand.length)
+    );
+
+    player.guaranteedTricks = Math.max(0, player.hand.length - maxOtherHand);
+  });
+}
+
+function calculateNaturalTricks(players) {
+  const activePlayers = players.filter(player => !player.eliminated);
+
+  activePlayers.forEach(player => {
+    if (activePlayers.length === 1) {
+      player.tricksWon = (player.tricksWon || 0) + player.hand.length;
+      return;
+    }
+
+    const maxOtherHand = Math.max(
+      ...activePlayers
+        .filter(otherPlayer => otherPlayer !== player)
+        .map(otherPlayer => otherPlayer.hand.length)
+    );
+
+    const naturalTricks = Math.max(0, player.hand.length - maxOtherHand);
+    player.tricksWon = (player.tricksWon || 0) + naturalTricks;
+  });
+}
+
 io.on('connection', (socket) => {
   console.log(`User connected: ${socket.id}`);
 
@@ -136,40 +175,42 @@ io.on('connection', (socket) => {
     const { roomCode } = data;
     const room = rooms[roomCode];
     if (room && room.status === 'WAITING') {
-      room.round++;
       room.deck = shuffle(createDeck());
       room.status = 'BETTING';
       room.currentTurnIndex = 0;
       room.trickStarterIndex = 0;
       room.tableCards = [];
+      room.roundHistory = [];
+      room.cardsPlayedInRound = 0;
+      room.cardsPerPlayer = 0; // será calculado após distribuição
       
-      // Distribui cartas para cada jogador
+      // Distribui cartas para cada jogador (quantidade = vidas atuais do jogador)
       room.players.forEach(player => {
         player.hand = [];
         player.tricksWon = 0;
-        player.lives = player.lives !== undefined ? player.lives : 5; // Configura vidas iniciais
-        for (let i = 0; i < room.round; i++) {
+        player.lives = player.lives !== undefined ? player.lives : 5; // Vidas iniciais = 5 cartas
+        const cardCount = player.lives; // Vidas = quantidade de cartas
+        for (let i = 0; i < cardCount; i++) {
           player.hand.push(room.deck.pop());
         }
       });
 
       // Cálculo de Vazas Naturais Garantidas
+      calculateGuaranteedTricks(room.players);
+
       room.players.forEach(player => {
-        if (room.players.length > 1) {
-          const maxOtherHand = Math.max(...room.players.filter(p => p !== player && !p.eliminated).map(p => p.hand.length));
-          player.guaranteedTricks = Math.max(0, player.hand.length - maxOtherHand);
-        } else {
-          player.guaranteedTricks = player.hand.length;
-        }
         // Envia as cartas de forma privada para o socket do jogador
-        io.to(player.socketId).emit('hand_dealt', { hand: player.hand });
+        io.to(player.socketId).emit('hand_dealt', { hand: player.hand, lives: player.lives });
       });
 
       // Vira a carta trunfo
       room.currentTrump = room.deck.pop();
 
       // Notifica todos na sala que a rodada de apostas começou
-      io.to(roomCode).emit('round_started', { round: room.round, trump: room.currentTrump });
+      // Envia também quantas cartas foram distribuídas (para limitar o stepper de apostas)
+      room.cardsPerPlayer = room.players.filter(p => !p.eliminated)[0]?.hand.length || 5;
+      room.playableTricksThisRound = Math.min(...room.players.filter(p => !p.eliminated).map(p => p.hand.length));
+      io.to(roomCode).emit('round_started', { trump: room.currentTrump, cardsPerPlayer: room.cardsPerPlayer });
       io.to(roomCode).emit('turn_update', { currentPlayerId: room.players[room.currentTurnIndex].socketId });
       
       console.log(`[START] Game started in room ${roomCode}. Round: ${room.round}`);
@@ -195,12 +236,14 @@ io.on('connection', (socket) => {
     }
 
     // Regra do último jogador (não pode empatar)
-    if (room.currentTurnIndex === room.players.length - 1) {
+    const activePlayers = room.players.filter(p => !p.eliminated);
+    const isLastBettor = room.currentTurnIndex === activePlayers.length - 1;
+    if (isLastBettor) {
       let sum = 0;
-      for (let i = 0; i < room.players.length - 1; i++) {
-        sum += room.players[i].bet;
+      for (let i = 0; i < activePlayers.length - 1; i++) {
+        sum += activePlayers[i].bet || 0;
       }
-      if (sum + bet === room.round) {
+      if (sum + bet === room.cardsPerPlayer) {
         socket.emit('bet_error', { message: 'A soma das apostas não pode empatar com o número de cartas!' });
         return;
       }
@@ -263,6 +306,7 @@ io.on('connection', (socket) => {
         let winnerName = '';
         let isTie = false;
         let winnerIndex = -1;
+        let bestCard = null;
 
         const trumpValue = room.currentTrump.value;
         const playedTrumps = room.tableCards.filter(tc => tc.card.value === trumpValue);
@@ -273,6 +317,7 @@ io.on('connection', (socket) => {
           const bestTrump = playedTrumps[0];
           winnerIndex = bestTrump.playerIndex;
           winnerName = bestTrump.playerName;
+          bestCard = bestTrump.card;
         } else {
           // Não há trunfos, avalia carta mais alta
           room.tableCards.forEach(tc => {
@@ -288,6 +333,7 @@ io.on('connection', (socket) => {
           } else {
             winnerIndex = room.tableCards[0].playerIndex;
             winnerName = room.tableCards[0].playerName;
+            bestCard = room.tableCards[0].card;
           }
         }
 
@@ -295,40 +341,95 @@ io.on('connection', (socket) => {
           room.players[winnerIndex].tricksWon = (room.players[winnerIndex].tricksWon || 0) + 1;
         }
 
-        io.to(roomCode).emit('trick_resolved', { isTie, winnerName });
+        const starterName = room.players[room.trickStarterIndex].name;
+        const historyEntry = {
+          isTie,
+          winnerName,
+          winningCard: bestCard,
+          starterName
+        };
+        room.roundHistory.push(historyEntry);
 
-        // Verifica se a rodada inteira acabou (todos sem cartas)
+        io.to(roomCode).emit('trick_resolved', historyEntry);
+        io.to(roomCode).emit('history_updated', { history: room.roundHistory });
+
+        // Incrementa o contador de cartas jogadas na rodada
+        room.cardsPlayedInRound += room.players.filter(p => !p.eliminated).length;
+        console.log(`[TRICK] Cartas jogadas na rodada: ${room.cardsPlayedInRound} / ${room.cardsPerPlayer * room.players.filter(p => !p.eliminated).length}`);
+
         const activePlayers = room.players.filter(p => !p.eliminated);
-        const isRoundEnd = activePlayers.every(p => p.hand.length === 0);
+        const totalCardsThisRound = (room.playableTricksThisRound || 0) * activePlayers.length;
+        const isRoundEnd = room.cardsPlayedInRound >= totalCardsThisRound;
 
         if (isRoundEnd) {
           room.status = 'ROUND_END';
-          let survivors = 0;
-          let lastWinner = null;
+          calculateNaturalTricks(room.players);
 
+          // --- Calcula vidas e eliminações ---
+          const roundResults = [];
           room.players.forEach(p => {
             if (p.eliminated) return;
             const penalty = Math.abs((p.bet || 0) - (p.tricksWon || 0));
-            
-            if (penalty >= p.lives) {
-              p.eliminated = true;
+            p.lives -= penalty;
+            const wasEliminated = p.lives <= 0;
+            if (wasEliminated) {
               p.lives = 0;
-            } else {
-              p.lives -= penalty;
-              survivors++;
-              lastWinner = p;
+              p.eliminated = true;
+              io.to(p.socketId).emit('player_eliminated', { name: p.name });
             }
+            roundResults.push({ name: p.name, bet: p.bet, tricksWon: p.tricksWon, penalty, lives: p.lives, eliminated: p.eliminated });
           });
 
-          if (survivors <= 1) {
+          const survivors = room.players.filter(p => !p.eliminated);
+
+          // Emite resultado da rodada para todos
+          io.to(roomCode).emit('round_results', { results: roundResults });
+
+          if (survivors.length <= 1) {
             room.status = 'GAME_OVER';
-            io.to(roomCode).emit('game_over', { winner: lastWinner ? lastWinner.name : 'Ninguém' });
+            const champion = survivors[0];
+            io.to(roomCode).emit('game_over', { winner: champion ? champion.name : 'Ninguém' });
           } else {
-            // Avisa o fim da rodada para prosseguir para a próxima (após delay ou clique na UI)
-            io.to(roomCode).emit('round_end', { players: room.players });
+            // --- Inicia nova rodada automaticamente após 5 segundos ---
+            setTimeout(() => {
+              room.deck = shuffle(createDeck());
+              room.status = 'BETTING';
+              room.currentTurnIndex = 0;
+              room.trickStarterIndex = 0;
+              room.tableCards = [];
+              room.roundHistory = [];
+              room.cardsPlayedInRound = 0;
+              room.playableTricksThisRound = 0;
+
+              // Distribui conforme vidas restantes
+              room.players.forEach(p => {
+                p.hand = [];
+                p.tricksWon = 0;
+                p.bet = 0;
+                if (p.eliminated) return;
+                for (let i = 0; i < p.lives; i++) {
+                  p.hand.push(room.deck.pop());
+                }
+              });
+
+              calculateGuaranteedTricks(survivors);
+
+              survivors.forEach(p => {
+                io.to(p.socketId).emit('hand_dealt', { hand: p.hand, lives: p.lives });
+              });
+
+              room.currentTrump = room.deck.pop();
+              room.cardsPerPlayer = survivors[0]?.hand.length || 1;
+              room.playableTricksThisRound = Math.min(...survivors.map(p => p.hand.length));
+
+              io.to(roomCode).emit('new_round_started', { trump: room.currentTrump, cardsPerPlayer: room.cardsPerPlayer, players: room.players });
+              io.to(roomCode).emit('turn_update', { currentPlayerId: survivors[room.currentTurnIndex]?.socketId });
+
+              console.log(`[NEW ROUND] Nova rodada iniciada na sala ${roomCode}.`);
+            }, 5000);
           }
         } else {
-          // Limpa a mesa para a próxima vaza
+          // Próxima vaza normal
           room.tableCards = [];
           room.status = 'PLAYING';
           room.currentTurnIndex = winnerIndex;
