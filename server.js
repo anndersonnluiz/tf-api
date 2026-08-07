@@ -112,6 +112,7 @@ function buildPublicPlayerStates(room) {
     name: player.name,
     lives: player.lives !== undefined ? player.lives : 5,
     tricksWon: player.tricksWon || 0,
+    guaranteedTricks: player.guaranteedTricks || 0,
     bet: player.bet,
     hasBet: player.bet !== undefined && player.bet !== null,
     cardsInHand: player.hand ? player.hand.length : 0,
