@@ -5,7 +5,7 @@ const cors = require('cors');
 const { createDeck, shuffle } = require('./deck');
 
 // Hierarquia de cartas (Truco / clássico: 4 é fraco, 3 é forte)
-const cardValuesHierarchy = ['4', '5', '6', '7', 'Q', 'J', 'K', 'A', '2', '3'];
+const cardValuesHierarchy = ['4', '5', '6', '7', '10', '11', '12', 'A', '2', '3'];
 
 // Força dos naipes para desempate de Trunfo (Manilha)
 // Ramo > Taça > Espada > Moeda
