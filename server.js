@@ -304,20 +304,6 @@ io.on('connection', (socket) => {
       return;
     }
 
-    const activePlayers = room.players.filter((player) => !player.eliminated);
-    const isLastBettor = room.currentTurnIndex === activePlayers.length - 1;
-    if (isLastBettor) {
-      let sum = 0;
-      for (let i = 0; i < activePlayers.length - 1; i += 1) {
-        sum += activePlayers[i].bet || 0;
-      }
-
-      if (sum + bet === room.cardsPerPlayer) {
-        socket.emit('bet_error', { message: 'A soma das apostas não pode empatar com o número de cartas!' });
-        return;
-      }
-    }
-
     currentPlayer.bet = bet;
     room.currentTurnIndex += 1;
 
