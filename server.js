@@ -201,6 +201,11 @@ io.on('connection', (socket) => {
     const { roomCode } = data;
     const room = rooms[roomCode];
     if (room && room.status === 'WAITING') {
+      if (room.players.length < 2) {
+        socket.emit('error', { message: 'A partida precisa de pelo menos 2 jogadores para iniciar.' });
+        return;
+      }
+
       room.deck = shuffle(createDeck());
       room.status = 'BETTING';
       room.currentTurnIndex = 0;
