@@ -12,6 +12,7 @@ const cardValuesHierarchy = ['4', '5', '6', '7', 'Q', 'J', 'K', 'A', '2', '3'];
 const suitHierarchy = ['ouros', 'espadas', 'copas', 'paus']; // Índice maior = mais forte
 
 const PORT = Number(process.env.PORT) || 3000;
+const NEXT_ROUND_DELAY_MS = 7000;
 const allowedOrigins = (process.env.ALLOWED_ORIGINS || '*')
   .split(',')
   .map((origin) => origin.trim())
@@ -457,7 +458,7 @@ io.on('connection', (socket) => {
               io.to(roomCode).emit('turn_update', { currentPlayerId: survivors[room.currentTurnIndex]?.socketId });
 
               console.log(`[NEW ROUND] Nova rodada iniciada na sala ${roomCode}.`);
-            }, 5000);
+            }, NEXT_ROUND_DELAY_MS);
           }
         } else {
           room.tableCards = [];
