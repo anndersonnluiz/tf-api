@@ -66,6 +66,40 @@ function generateRoomCode() {
   return code;
 }
 
+function getActivePlayerIndices(room) {
+  return room.players
+    .map((player, index) => ({ player, index }))
+    .filter(({ player }) => !player.eliminated)
+    .map(({ index }) => index);
+}
+
+function getActivePlayers(room) {
+  return room.players.filter((player) => !player.eliminated);
+}
+
+function getNextActivePlayerIndex(room, currentIndex) {
+  const activeIndices = getActivePlayerIndices(room);
+
+  if (!activeIndices.length) {
+    return -1;
+  }
+
+  const currentPosition = activeIndices.indexOf(currentIndex);
+  if (currentPosition === -1) {
+    return activeIndices[0];
+  }
+
+  return activeIndices[(currentPosition + 1) % activeIndices.length];
+}
+
+function getNextRoundStarterIndex(room) {
+  if (room.roundStarterIndex === undefined || room.roundStarterIndex === null) {
+    return getActivePlayerIndices(room)[0] ?? 0;
+  }
+
+  return getNextActivePlayerIndex(room, room.roundStarterIndex);
+}
+
 function calculateGuaranteedTricks(players) {
   const activePlayers = players.filter((player) => !player.eliminated);
 
@@ -152,7 +186,8 @@ io.on('connection', (socket) => {
       status: 'WAITING',
       isPrivate: !!isPrivate,
       deck: [],
-      round: 0
+      round: 0,
+      roundStarterIndex: 0
     };
 
     socket.join(roomCode);
@@ -216,7 +251,8 @@ io.on('connection', (socket) => {
         status: 'WAITING',
         isPrivate: false,
         deck: [],
-        round: 0
+        round: 0,
+        roundStarterIndex: 0
       };
 
       socket.join(roomCode);
@@ -241,8 +277,9 @@ io.on('connection', (socket) => {
 
     room.deck = shuffle(createDeck());
     room.status = 'BETTING';
-    room.currentTurnIndex = 0;
-    room.trickStarterIndex = 0;
+    room.roundStarterIndex = getNextRoundStarterIndex(room);
+    room.currentTurnIndex = room.roundStarterIndex;
+    room.trickStarterIndex = room.roundStarterIndex;
     room.tableCards = [];
     room.roundHistory = [];
     room.cardsPlayedInRound = 0;
@@ -255,8 +292,7 @@ io.on('connection', (socket) => {
       player.bet = null;
       player.lives = player.lives !== undefined ? player.lives : 5;
 
-      const cardCount = player.lives;
-      for (let i = 0; i < cardCount; i += 1) {
+      for (let i = 0; i < player.lives; i += 1) {
         player.hand.push(room.deck.pop());
       }
     });
@@ -268,10 +304,8 @@ io.on('connection', (socket) => {
     });
 
     room.currentTrump = room.deck.pop();
-    room.cardsPerPlayer = room.players.filter((player) => !player.eliminated)[0]?.hand.length || 5;
-    room.playableTricksThisRound = Math.min(
-      ...room.players.filter((player) => !player.eliminated).map((player) => player.hand.length)
-    );
+    room.cardsPerPlayer = getActivePlayers(room)[0]?.hand.length || 5;
+    room.playableTricksThisRound = Math.min(...getActivePlayers(room).map((player) => player.hand.length));
 
     io.to(roomCode).emit('round_started', {
       round: room.round,
@@ -306,11 +340,13 @@ io.on('connection', (socket) => {
     }
 
     currentPlayer.bet = bet;
-    room.currentTurnIndex += 1;
 
-    if (room.currentTurnIndex >= room.players.length) {
+    const activePlayers = getActivePlayers(room);
+    const allBetsDone = activePlayers.every((player) => typeof player.bet === 'number');
+
+    if (allBetsDone) {
       room.status = 'PLAYING';
-      room.currentTurnIndex = room.trickStarterIndex || 0;
+      room.currentTurnIndex = room.trickStarterIndex;
 
       io.to(roomCode).emit('playing_started', {
         message: 'As apostas terminaram! A fase de jogo começou.',
@@ -320,6 +356,7 @@ io.on('connection', (socket) => {
       return;
     }
 
+    room.currentTurnIndex = getNextActivePlayerIndex(room, room.currentTurnIndex);
     emitTurnUpdate(roomCode, room, room.players[room.currentTurnIndex].socketId);
   });
 
@@ -356,7 +393,7 @@ io.on('connection', (socket) => {
       card
     });
 
-    room.currentTurnIndex = (room.currentTurnIndex + 1) % room.players.length;
+    room.currentTurnIndex = getNextActivePlayerIndex(room, room.currentTurnIndex);
 
     io.to(roomCode).emit('table_updated', {
       tableCards: room.tableCards,
@@ -364,7 +401,8 @@ io.on('connection', (socket) => {
     });
     emitTurnUpdate(roomCode, room, room.players[room.currentTurnIndex].socketId);
 
-    if (room.tableCards.length !== room.players.length) {
+    const activePlayers = getActivePlayers(room);
+    if (room.tableCards.length !== activePlayers.length) {
       return;
     }
 
@@ -423,10 +461,10 @@ io.on('connection', (socket) => {
       });
       io.to(roomCode).emit('history_updated', { history: room.roundHistory });
 
-      const activePlayers = room.players.filter((player) => !player.eliminated);
-      room.cardsPlayedInRound += activePlayers.length;
+      const currentActivePlayers = getActivePlayers(room);
+      room.cardsPlayedInRound += currentActivePlayers.length;
 
-      const totalCardsThisRound = (room.playableTricksThisRound || 0) * activePlayers.length;
+      const totalCardsThisRound = (room.playableTricksThisRound || 0) * currentActivePlayers.length;
       const isRoundEnd = room.cardsPlayedInRound >= totalCardsThisRound;
 
       if (isRoundEnd) {
@@ -458,7 +496,7 @@ io.on('connection', (socket) => {
           });
         });
 
-        const survivors = room.players.filter((player) => !player.eliminated);
+        const survivors = getActivePlayers(room);
         io.to(roomCode).emit('round_results', {
           results: roundResults,
           playerStates: buildPublicPlayerStates(room)
@@ -477,8 +515,9 @@ io.on('connection', (socket) => {
         setTimeout(() => {
           room.deck = shuffle(createDeck());
           room.status = 'BETTING';
-          room.currentTurnIndex = 0;
-          room.trickStarterIndex = 0;
+          room.roundStarterIndex = getNextRoundStarterIndex(room);
+          room.currentTurnIndex = room.roundStarterIndex;
+          room.trickStarterIndex = room.roundStarterIndex;
           room.tableCards = [];
           room.roundHistory = [];
           room.cardsPlayedInRound = 0;
@@ -499,7 +538,7 @@ io.on('connection', (socket) => {
             }
           });
 
-          calculateGuaranteedTricks(survivors);
+          calculateGuaranteedTricks(room.players);
 
           survivors.forEach((player) => {
             io.to(player.socketId).emit('hand_dealt', { hand: player.hand, lives: player.lives });
@@ -516,7 +555,7 @@ io.on('connection', (socket) => {
             players: room.players,
             playerStates: buildPublicPlayerStates(room)
           });
-          emitTurnUpdate(roomCode, room, survivors[room.currentTurnIndex]?.socketId);
+          emitTurnUpdate(roomCode, room, room.players[room.currentTurnIndex].socketId);
 
           console.log(`[NEW ROUND] Nova rodada iniciada na sala ${roomCode}.`);
         }, NEXT_ROUND_DELAY_MS);
